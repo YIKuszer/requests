@@ -124,7 +124,7 @@ class HTTPDigestAuth(AuthBase):
             self._thread_local.pos = None
             self._thread_local.num_401_calls = None
 
-    def build_digest_header(self, method, url):
+    def build_digest_header(self, method, url, body):
         """
         :rtype: str
         """
@@ -134,7 +134,14 @@ class HTTPDigestAuth(AuthBase):
         qop = self._thread_local.chal.get('qop')
         algorithm = self._thread_local.chal.get('algorithm')
         opaque = self._thread_local.chal.get('opaque')
+        body = body if body else ""
         hash_utf8 = None
+        qop_type = None
+
+        if qop and (qop == 'auth-int' or 'auth-int' in qop.split(',')):
+            qop_type = 'auth-int'
+        elif qop and (qop == 'auth' or 'auth' in qop.split(',')):
+            qop_type = 'auth'
 
         if algorithm is None:
             _algorithm = 'MD5'
@@ -180,7 +187,12 @@ class HTTPDigestAuth(AuthBase):
             path += '?' + p_parsed.query
 
         A1 = '%s:%s:%s' % (self.username, realm, self.password)
-        A2 = '%s:%s' % (method, path)
+
+        # In cas of auth-int, A2 has the hash of the body
+        if qop_type and qop_type == 'auth-int':
+            A2 = '%s:%s:%s' % (method, path, hash_utf8(body))
+        else:
+            A2 = '%s:%s' % (method, path)
 
         HA1 = hash_utf8(A1)
         HA2 = hash_utf8(A2)
@@ -201,13 +213,12 @@ class HTTPDigestAuth(AuthBase):
 
         if not qop:
             respdig = KD(HA1, "%s:%s" % (nonce, HA2))
-        elif qop == 'auth' or 'auth' in qop.split(','):
+        elif qop_type:
             noncebit = "%s:%s:%s:%s:%s" % (
-                nonce, ncvalue, cnonce, 'auth', HA2
+                nonce, ncvalue, cnonce, qop_type, HA2
             )
             respdig = KD(HA1, noncebit)
         else:
-            # XXX handle auth-int.
             return None
 
         self._thread_local.last_nonce = nonce
@@ -221,8 +232,8 @@ class HTTPDigestAuth(AuthBase):
             base += ', algorithm="%s"' % algorithm
         if entdig:
             base += ', digest="%s"' % entdig
-        if qop:
-            base += ', qop="auth", nc=%s, cnonce="%s"' % (ncvalue, cnonce)
+        if qop_type:
+            base += ', qop="%s", nc=%s, cnonce="%s"' % (qop_type, ncvalue, cnonce)
 
         return 'Digest %s' % (base)
 
@@ -265,7 +276,7 @@ class HTTPDigestAuth(AuthBase):
             prep.prepare_cookies(prep._cookies)
 
             prep.headers['Authorization'] = self.build_digest_header(
-                prep.method, prep.url)
+                prep.method, prep.url, prep.body)
             _r = r.connection.send(prep, **kwargs)
             _r.history.append(r)
             _r.request = prep
@@ -280,7 +291,7 @@ class HTTPDigestAuth(AuthBase):
         self.init_per_thread_state()
         # If we have a saved nonce, skip the 401
         if self._thread_local.last_nonce:
-            r.headers['Authorization'] = self.build_digest_header(r.method, r.url)
+            r.headers['Authorization'] = self.build_digest_header(r.method, r.url, r.body)
         try:
             self._thread_local.pos = r.body.tell()
         except AttributeError:
